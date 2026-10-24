@@ -108,8 +108,12 @@ a { color: var(--cherry-deep); font-weight: 800; }
   transition: transform .35s ease, opacity .35s ease;
 }
 .env.open .seal { transform: scale(0) rotate(90deg); opacity: 0; }
-.go { font: 700 19px/1 var(--display); color: var(--ink); background: var(--butter); border: 2.5px solid #fff; border-radius: 99px; padding: 15px 26px; cursor: pointer; box-shadow: 0 5px 0 #000; animation: popIn .4s ease; }
+.go { font: 700 19px/1 var(--display); color: var(--ink); background: var(--butter); border: 2.5px solid #fff; border-radius: 99px; padding: 15px 26px; cursor: pointer; box-shadow: 0 5px 0 #000; animation: popIn .4s ease, nudge 1.6s ease-in-out .8s infinite; }
 @keyframes popIn { from { transform: scale(.6); opacity: 0; } }
+/* Gentle pulse so the button reads as "tap me", not part of the animation */
+@keyframes nudge { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.07); } }
+.go-hint { color: #fff; font: 600 28px/1 var(--hand); text-align: center; margin-top: 18px; animation: popIn .4s ease; }
+.go-hint small { display: block; font: 600 14px/1.4 var(--body); opacity: .8; margin-top: 8px; letter-spacing: .02em; }
 .intro-hint, .env { transition: margin .5s ease; }
 #intro.letter .env { margin-top: 70px; }
 #intro.letter .intro-hint { opacity: 0; transition: opacity .3s ease; }
@@ -320,7 +324,8 @@ footer small { display: block; margin-top: 8px; color: var(--ink-soft); font-wei
     <span class="env-flap"></span>
     <span class="seal" aria-hidden="true">K</span>
   </button>
-  <button class="go" id="go" type="button" hidden>Open my invite</button>
+  <p class="go-hint" id="goHint" hidden>Your invite is inside!<small>Tap below to see the details and RSVP</small></p>
+  <button class="go" id="go" type="button" hidden>Open my invite &amp; RSVP →</button>
   <button class="skip" id="skip" type="button">Skip to the invite</button>
 </div>
 
@@ -467,6 +472,7 @@ footer small { display: block; margin-top: 8px; color: var(--ink-soft); font-wei
   <footer>
     <p>can't wait to see you!<br>love, Karmen</p>
     <small id="tossCount">Caps tossed so far: 0</small>
+    <small id="capsTotal" hidden></small>
   </footer>
 </main>
 
@@ -488,6 +494,16 @@ footer small { display: block; margin-top: 8px; color: var(--ink-soft); font-wei
       .then(function (r) { return r.json(); })
       .then(function (d) { if (d && d.ok) ok(d.coming); else fail({ message: (d && d.error) || 'unknown error' }); })
       .catch(function () { fail({ message: 'no connection' }); });
+  }
+  // Shared cap-toss total, kept by the same Google script
+  function apiCaps(ok, fail) {
+    fetch(API + '?action=caps').then(function (r) { return r.json(); })
+      .then(function (d) { if (d && d.ok && typeof d.caps === 'number') ok(d.caps); else fail(); }).catch(fail);
+  }
+  function apiAddCaps(n, ok, fail) {
+    fetch(API, { method: 'POST', keepalive: true, headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ action: 'cap', n: n }) })
+      .then(function (r) { return r.json(); })
+      .then(function (d) { if (d && d.ok && typeof d.caps === 'number') ok(d.caps); else fail(); }).catch(fail);
   }
   var reduce = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
   var $ = function (id) { return document.getElementById(id); };
@@ -532,7 +548,7 @@ footer small { display: block; margin-top: 8px; color: var(--ink-soft); font-wei
     setTimeout(function () {
       var r = env.getBoundingClientRect();
       burst(r.left + r.width / 2, r.top, 60, 2.6);
-      $('skip').hidden = true; $('go').hidden = false; $('go').focus({ preventScroll: true });
+      $('skip').hidden = true; $('goHint').hidden = false; $('go').hidden = false; $('go').focus({ preventScroll: true });
     }, 2000);
   }
   function enterInvite() {
@@ -544,6 +560,8 @@ footer small { display: block; margin-top: 8px; color: var(--ink-soft); font-wei
   $('go').addEventListener('click', enterInvite);
   env.addEventListener('click', function () { if (opened && !$('go').hidden) enterInvite(); else openEnvelope(false); });
   $('skip').addEventListener('click', function () { openEnvelope(true); });
+  // Once the card is out, a tap anywhere on the dark background also opens the invite
+  intro.addEventListener('click', function (e) { if (e.target === intro && !$('go').hidden) enterInvite(); });
   document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !opened) openEnvelope(true); });
 
   /* ---------- Countdown (Malaysia time) ---------- */
@@ -569,8 +587,39 @@ footer small { display: block; margin-top: 8px; color: var(--ink-soft); font-wei
     var r = cap.getBoundingClientRect();
     setTimeout(function () { burst(r.left + r.width / 2, r.top + 10, 26, 2.8); }, 380);
     if (notes[tosses]) $('tossNote').textContent = notes[tosses];
-    $('tossCount').textContent = 'Caps tossed so far: ' + tosses;
+    $('tossCount').textContent = 'You tossed it ' + tosses + (tosses === 1 ? ' time' : ' times');
+    queueCap();
   });
+
+  /* ---------- Caps tossed by everyone ---------- */
+  // Taps are grouped and sent a moment after the guest stops tapping, so the Google script isn't flooded.
+  var capsKnown = null, capsPending = 0, capsTimer = 0, capsSending = false;
+  function showCaps() {
+    if (capsKnown === null) return;
+    $('capsTotal').textContent = 'Caps tossed by everyone: ' + (capsKnown + capsPending).toLocaleString('en-US');
+    $('capsTotal').hidden = false;
+  }
+  function gotCaps(n) { capsKnown = +n || 0; showCaps(); }
+  function flushCaps() {
+    clearTimeout(capsTimer);
+    if (!capsPending || capsSending) return;
+    var n = Math.min(capsPending, 50); capsPending -= n; capsSending = true;
+    if (capsKnown !== null) capsKnown += n;
+    var ok = function (total) { capsSending = false; gotCaps(total); if (capsPending) flushCaps(); };
+    var fail = function () { capsSending = false; };
+    if (gas) google.script.run.withSuccessHandler(ok).withFailureHandler(fail).addCaps(n);
+    else apiAddCaps(n, ok, fail);
+  }
+  function queueCap() {
+    if (!live) { capsKnown = (capsKnown || 0); capsKnown++; showCaps(); return; } // preview on this Mac: count locally only
+    if (capsKnown === null) return; // script not ready for caps yet: don't send anything
+    capsPending++; showCaps();
+    clearTimeout(capsTimer); capsTimer = setTimeout(flushCaps, 1500);
+  }
+  addEventListener('pagehide', flushCaps);
+  if (gas) google.script.run.withSuccessHandler(gotCaps).withFailureHandler(function () {}).getCaps();
+  else if (live) apiCaps(gotCaps, function () {});
+  else gotCaps(0);
 
   /* ---------- How many are coming (a number only, never names) ---------- */
   var previewComing = 0;
